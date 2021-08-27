@@ -1,14 +1,57 @@
-import org.apache.commons.io.FileUtils
+import finalibre.marketdata.util.XMLParsing
+import org.apache.commons.io.{FileUtils, IOUtils}
 import sttp.client3.*
 
-import java.io.File
+import java.io.{File, FileInputStream}
+import java.time.LocalDate
+import java.util.zip.{ZipFile, ZipInputStream}
 import scala.util.Try
-import scala.xml.XML
+import scala.xml.{Elem, NodeSeq, XML}
 
 object ExploreTransparencyDownload:
-  def main(args: Array[String]): Unit =
-    val outputFolder = new File("""c:\temp\esma-transparency-files""")
 
+  val outputFolder = new File("""c:\temp\esma-transparency-files""")
+
+  def main(args: Array[String]): Unit =
+
+
+    for
+      fil <- outputFolder.listFiles().sortBy(en => -en.length()).take(1)
+    do
+      println(s"Doing file: $fil")
+      val elemStr = unzip(fil)
+      val rootShell = XMLParsing.extractElementShells(elemStr)
+      println("Completed running through file")
+    //val parsed = parse(elem \\ "")
+
+  //println(parsed)
+
+
+
+  def parse(nodeSeq : NodeSeq) : TradeReport =
+    val id = (nodeSeq \ "Id").text
+    val timInf = nodeSeq \ "RptgPrd" \ "FrDtToDt"
+    val from = LocalDate.parse((timInf \ "FrDt").text)
+    val to = LocalDate.parse((timInf \ "ToDt").text)
+    val stats = nodeSeq \ "Sttstcs"
+
+    val cur = stats \\ "AvrgDalyTrnvr" \@ "Ccy"
+    val turnover = (stats \ "AvrgDalyTrnvr").text.toDouble
+    val scale = (stats \ "LrgInScale").text.toDouble
+    val noOfTrans = (stats \ "LrgInScale").text.toDouble
+    TradeReport(id, from, to, cur, turnover, scale, noOfTrans)
+
+  case class TradeReport(securityID : String, periodFrom : LocalDate, periodTo : LocalDate, cur : String, dailyTurnover : Double, scale : Double, noOfTrans : Double)
+
+
+  def unzip(file : File) : String =
+    val zipFile : ZipFile = ZipFile(file)
+    val entry = zipFile.entries().nextElement()
+    IOUtils.toString(zipFile.getInputStream(entry), "UTF-8")
+
+
+
+  def downloadFiles : Unit =
     val url = uri"""https://registers.esma.europa.eu/solr/esma_registers_fitrs_files/select?q=*&fq=creation_date:%5B2017-11-24T00:00:00Z+TO+2021-11-24T23:59:59Z%5D&wt=xml&indent=true&start=0&rows=20000"""
 
     val backend = HttpURLConnectionBackend()
@@ -36,7 +79,6 @@ object ExploreTransparencyDownload:
         }
 
     }
-
 
 
 
