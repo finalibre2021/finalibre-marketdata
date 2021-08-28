@@ -1,5 +1,6 @@
 package finalibre.marketdata.util
 
+import java.io.{File, FileOutputStream}
 import scala.collection.mutable as mut
 import mut.ArrayBuffer
 
@@ -13,6 +14,8 @@ object XMLParsing {
   object ElementShell:
     def from(name : String, children : mut.ArrayBuffer[ElementShell], level : Int) = ElementShell(name, children, level)
 
+  case class SplitResult(tmpFolder : File, splitBy : String, root : File, files : List[File])
+
   private enum ParsingState:
     case UnMatched, MatchedOpen, MatchedOpenQuestionMark, MatchedOpenSlash, MatchedElementNameCharacter, MatchedPrologCharacter, MatchedCloseSlash, MatchedCloseQuestionMark
 
@@ -20,14 +23,121 @@ object XMLParsing {
   private val ElementNameParseStates = Set(ParsingState.MatchedOpen, ParsingState.MatchedOpenSlash, ParsingState.MatchedElementNameCharacter)
 
 
-  def extractElementShells(xmlString : String) : Either[Seq[String], ElementShell] =
-    //val charArr = xmlString.trim.toCharArray
+  private val lockObj = "lock"
+  private var currentId = 0L
+  private def nextId : Long = lockObj.synchronized {
+    currentId += 1L
+    currentId
+  }
+
+  def extractShells(xmlString : String) : Either[Seq[String], ElementShell] =
+    val parseErrors = mut.ArrayBuffer.empty[String]
+    var root : Option[ElementShell] = None
+
+    traverseXml(
+      xmlString,
+      (err) => parseErrors += err,
+      (rootEl) => root = Some(rootEl)
+    )
+
+    (parseErrors, root) match {
+      case (errs, _) if !errs.isEmpty => Left(errs.toSeq)
+      case (_, Some(roo)) => Right(roo)
+      case (_,_) => Left(Seq("Could not match root"))
+    }
+
+  def splitXmlString(str : String, masterTempDir : File, splitTag : String) : Either[Seq[String], SplitResult] =
+    val tempId = nextId
+    val tmpDir = new File(masterTempDir, s"$tempId")
+    if(!tmpDir.exists())
+      tmpDir.mkdirs()
+    tmpDir.listFiles().foreach(f => f.delete())
+    val encapsulating = new StringBuilder()
+    val buffer = new StringBuilder()
+
+    val tagBuffer = new StringBuilder()
+    var isParsingTag = false
+    def flushTagBuffer() : Unit =
+      buffer.append(tagBuffer)
+      tagBuffer.clear()
+      isParsingTag = false
+
+    var nestingLevel = 0
+
+    val errors = mut.ArrayBuffer.empty[String]
+    val files = mut.ArrayBuffer.empty[File]
+    var root : Option[File] = None
+
+    traverseXml(
+      str,
+      onError = err => errors += err,
+      onAssembledRoot = (roo) => {
+        encapsulating.append(buffer)
+        buffer.clear()
+        val rootFile = new File(tmpDir,"a_root.xml")
+        writeOutput(encapsulating, rootFile)
+        root = Some(rootFile)
+      },
+      onOpenTag = {
+        case str if str == splitTag =>
+          if nestingLevel == 0
+          then
+            encapsulating.append(buffer)
+            buffer.clear()
+          flushTagBuffer()
+          nestingLevel += 1
+        case _ =>
+          flushTagBuffer()
+      },
+      onCloseTag = {
+        case str if str == splitTag =>
+          flushTagBuffer()
+          nestingLevel -= 1
+          if nestingLevel == 0
+          then
+            val id = nextId
+            encapsulating.append(s"\r\n    <movedTo id=\"$id\"/>")
+            val outFile = new File(tmpDir, s"${id}.xml")
+            writeOutput(buffer, outFile)
+            files += outFile
+        case _ =>
+          flushTagBuffer()
+      },
+      feed = {
+        case '<' =>
+          isParsingTag = true
+          tagBuffer.append('<')
+        case ch if isParsingTag =>
+          tagBuffer.append(ch)
+        case ch => buffer.append(ch)
+      }
+    )
+    (errors, root) match {
+      case (errs, _) if !errs.isEmpty => Left(errs.toSeq)
+      case (_, Some(roo)) => Right(SplitResult(tmpDir, splitTag, roo, files.toList))
+      case (_,_) => Left(Seq("Could not match root"))
+    }
+
+
+  private def writeOutput(builder : StringBuilder, file : File) : Unit =
+    file.createNewFile()
+    val outStream = new FileOutputStream(file)
+    builder.foreach(ch => outStream.write(ch))
+    outStream.close()
+
+
+  private def traverseXml(
+                           xmlString : String,
+                           onError : String => Unit,
+                           onAssembledRoot : ElementShell => Unit,
+                           onOpenTag : String => Unit = str => (),
+                           onCloseTag : String => Unit = str => (),
+                           feed : Char => Unit = ch => ()
+                         ) : Unit =
     var currentState = ParsingState.UnMatched
     val currentElementName = new StringBuilder()
     val openElements = mut.ArrayDeque.empty[ElementShell]
     var currentElementIsOpen = true
-    val parseErrors = mut.ArrayBuffer.empty[String]
-    var root : Option[ElementShell] = None
     var currentLevel = 0
     var isInAttributeString = false
     var spaceEncountered = false
@@ -40,6 +150,7 @@ object XMLParsing {
     for
       i <- 0 until xmlString.length
     do
+      feed(xmlString(i))
       (xmlString(i), currentState) match {
         case ('"',_) =>
           isInAttributeString = !isInAttributeString
@@ -49,9 +160,8 @@ object XMLParsing {
           currentState = ParsingState.MatchedOpen
           spaceEncountered = false
           currentElementIsOpen = true
-
         case ('<', _) =>
-          parseErrors += createUnexpectedCharacterError('<', i, 100)
+          onError(createUnexpectedCharacterError('<', i, 100))
         case ('/', ParsingState.MatchedOpen) =>
           currentState = ParsingState.MatchedOpenSlash
           currentElementIsOpen = false
@@ -59,7 +169,7 @@ object XMLParsing {
           currentState = ParsingState.MatchedCloseSlash
           currentElementIsOpen = false
         case ('/', _) =>
-          parseErrors += createUnexpectedCharacterError('/', i, 100)
+          onError(createUnexpectedCharacterError('/', i, 100))
         case ('?', ParsingState.MatchedOpen) =>
           currentState = ParsingState.MatchedOpenQuestionMark
         case ('?', ParsingState.MatchedPrologCharacter) =>
@@ -79,24 +189,24 @@ object XMLParsing {
                 case Some(parent) =>
                   parent.elementChildren += el
                 case None if i >= xmlString.length - 2 =>
-                  root = Some(el)
+                  onAssembledRoot(el)
                 case _ =>
-                  parseErrors += s"Open element stack is empty for name: $nam at index: $i and can therefore not add element to parent"
-                  val restOfString = xmlString.substring(510062727, xmlString.length)
-                  println(s"Rest of string: $restOfString")
+                  onError(s"Open element stack is empty for name: $nam at index: $i and can therefore not add element to parent")
               }
+              onCloseTag(nam)
             case (false, Some(el)) =>
-              parseErrors += s"Failed to match open element on stack for: $nam (on stack: ${el.elementName}) at index: $i"
+              onError(s"Failed to match open element on stack for: $nam (on stack: ${el.elementName}) at index: $i")
             case (false, None) =>
-              parseErrors += s"Cannot close element: $nam since open element stack is empty"
+              onError(s"Cannot close element: $nam since open element stack is empty")
             case (true,_) =>
               currentLevel += 1
               val thisElement = ElementShell.from(nam, new ArrayBuffer[ElementShell], currentLevel)
               openElements.prepend(thisElement)
+              onOpenTag(nam)
           }
           currentState = ParsingState.UnMatched
 
-        case ('>',_) => parseErrors += createUnexpectedCharacterError('>', i, 100)
+        case ('>',_) => onError(createUnexpectedCharacterError('>', i, 100))
 
         case (' ', _) =>
           spaceEncountered = true
@@ -107,29 +217,8 @@ object XMLParsing {
             currentElementName.append(ch)
           currentState = ParsingState.MatchedElementNameCharacter
         case (ch, ParsingState.UnMatched) =>
-        case (ch, st) => parseErrors += createUnexpectedCharacterError(ch, i, 100)
+        case (ch, st) => onError(createUnexpectedCharacterError(ch, i, 100))
       }
-
-    (parseErrors, root) match {
-      case (errs, _) if !errs.isEmpty => Left(errs.toSeq)
-      case (_, Some(roo)) => Right(roo)
-      case (_,_) => Left(Seq("Could not match root"))
-    }
-
-
-  /*    val tessa = scala.collection.mutable.ArrayDeque.empty[String]
-      tessa.append("Append1")
-      tessa.append("Append2")
-      tessa.prepend("Prepend1")
-      tessa.prepend("Prepend2")
-      tessa.dropInPlace(1)
-      println(s"Dropped 1, state: $tessa")
-      tessa.dropRightInPlace(1)
-      println(s"Dropped 1 right, state: $tessa")
-
-      Dropped 1, state: ArrayDeque(Prepend1, Append1, Append2)
-  Dropped 1 right, state: ArrayDeque(Prepend1, Append1)*/
-
 
 
 
