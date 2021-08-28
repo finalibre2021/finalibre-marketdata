@@ -1,4 +1,5 @@
 import finalibre.marketdata.util.XMLParsing
+import finalibre.marketdata.util.XMLParsing.ElementShell
 import org.apache.commons.io.{FileUtils, IOUtils}
 import sttp.client3.*
 
@@ -13,19 +14,34 @@ object ExploreTransparencyDownload:
   val outputFolder = new File("""c:\temp\esma-transparency-files""")
 
   def main(args: Array[String]): Unit =
+    //downloadFiles
+    parseDownloaded()
+
+
+
+
+
+  def parseDownloaded() : Unit =
+    val elementCounts = scala.collection.mutable.HashMap.empty[(String, Int), Int]
+    def increment(el : ElementShell) : Unit =
+      val key = (el.elementName, el.level)
+      if !elementCounts.contains(key) then elementCounts(key) = 0
+      elementCounts(key) += 1
+
+    def recurse(el : ElementShell) : Unit =
+      increment(el)
+      el.children.foreach(recurse)
 
 
     for
-      fil <- outputFolder.listFiles().sortBy(en => -en.length()).take(1)
+     (preFix, splitTag) <- List(("FULECR", "EqtyTrnsprncyData"), ("FULNCR", "NonEqtyTrnsprncyData"))
+      fil <- outputFolder.listFiles().filter(f => f.getName.startsWith(preFix)).sortBy(en => -en.length()).take(1)
     do
       println(s"Doing file: $fil")
       val elemStr = unzip(fil)
-      val rootShell = XMLParsing.extractElementShells(elemStr)
-      println("Completed running through file")
-    //val parsed = parse(elem \\ "")
-
-  //println(parsed)
-
+      XMLParsing.splitXmlString(elemStr, new File("""c:\temp\transparency_split_""" + preFix), splitTag, 1000)
+      println(s"All done")
+     // NonEqtyTrnsprncyData at 5: 500000
 
 
   def parse(nodeSeq : NodeSeq) : TradeReport =
@@ -53,7 +69,7 @@ object ExploreTransparencyDownload:
 
   def downloadFiles : Unit =
     val url = uri"""https://registers.esma.europa.eu/solr/esma_registers_fitrs_files/select?q=*&fq=creation_date:%5B2017-11-24T00:00:00Z+TO+2021-11-24T23:59:59Z%5D&wt=xml&indent=true&start=0&rows=20000"""
-
+    // Reference instruments: https://registers.esma.europa.eu/solr/esma_registers_firds_files/select?q=*&fq=publication_date:%5B2017-08-25T00:00:00Z+TO+2017-08-25T23:59:59Z%5D&wt=xml&indent=true&start=0&rows=100
     val backend = HttpURLConnectionBackend()
     val response : Response[Either[String, String]] = basicRequest
       .get(url).send(backend)
@@ -61,9 +77,10 @@ object ExploreTransparencyDownload:
     response.body.toOption.foreach {
       case strRes =>
         val elem = XML.loadString(strRes)
-        val urls = (elem \\ "str").map(en => (en.\@("name"),en)).filter(en => en._1 == "download_link").map(en => en._2.text)
-        println(s"Found ${urls.length} URLs")
-        urls.foreach {
+        val urls = (elem \\ "str").map(en => (en.\@("name"),en)).filter(en => en._1 == "download_link").map(en => en._2.text).filter(_.contains("FUL"))
+        val notExists = urls.map(f => (f, f.replaceAll(".*fitrs/", ""))).filter(p => !(new File(outputFolder, p._2)).exists()).map(_._1)
+        println(s"Found ${notExists.length} URLs")
+        notExists.foreach {
           case fileUrl => Try {
             val fileResponse: Response[Either[String, Array[Byte]]] = basicRequest.response(asByteArray).get(uri"$fileUrl").send(backend)
             fileResponse.body.toOption.foreach {

@@ -14,7 +14,24 @@ object XMLParsing {
   object ElementShell:
     def from(name : String, children : mut.ArrayBuffer[ElementShell], level : Int) = ElementShell(name, children, level)
 
-  case class SplitResult(tmpFolder : File, splitBy : String, root : File, files : List[File])
+  case class SplitResult(tmpFolder : File, splitBy : String, root : File, files : List[File]):
+    private var isCleanedUp = false
+    def cleanUp() : Unit =
+      tmpFolder.listFiles().foreach(_.delete)
+      tmpFolder.delete()
+      isCleanedUp = true
+
+    def rootElement : Option[scala.xml.Elem] =
+      if isCleanedUp
+      then None
+      else
+        val elem = scala.xml.XML.loadFile(root)
+        Some(elem)
+
+    def fileElements : Unit =
+      files.to(LazyList).map {
+        case f => scala.xml.XML.loadFile(f)
+      }
 
   private enum ParsingState:
     case UnMatched, MatchedOpen, MatchedOpenQuestionMark, MatchedOpenSlash, MatchedElementNameCharacter, MatchedPrologCharacter, MatchedCloseSlash, MatchedCloseQuestionMark
@@ -46,7 +63,7 @@ object XMLParsing {
       case (_,_) => Left(Seq("Could not match root"))
     }
 
-  def splitXmlString(str : String, masterTempDir : File, splitTag : String) : Either[Seq[String], SplitResult] =
+  def splitXmlString(str : String, masterTempDir : File, splitTag : String, elementsPerFile : Int) : Either[Seq[String], SplitResult] =
     val tempId = nextId
     val tmpDir = new File(masterTempDir, s"$tempId")
     if(!tmpDir.exists())
@@ -63,15 +80,31 @@ object XMLParsing {
       isParsingTag = false
 
     var nestingLevel = 0
+    var bundleBuffer = new StringBuilder()
+    var inCurrentBundle = 0
 
     val errors = mut.ArrayBuffer.empty[String]
     val files = mut.ArrayBuffer.empty[File]
     var root : Option[File] = None
 
+    def writeBundle() : Unit =
+      val id = nextId
+      encapsulating.append(s"\r\n    <movedTo id=\"$id\"/>")
+      val outFile = new File(tmpDir, s"${id}.xml")
+      val toWrite = new StringBuilder("<container>\r\n").append(bundleBuffer).append("\r\n</container>")
+      writeOutput(toWrite, outFile)
+      bundleBuffer.clear()
+      files += outFile
+      inCurrentBundle = 0
+
     traverseXml(
       str,
       onError = err => errors += err,
       onAssembledRoot = (roo) => {
+        if inCurrentBundle > 0
+        then writeBundle()
+        buffer.append(tagBuffer)
+        tagBuffer.clear()
         encapsulating.append(buffer)
         buffer.clear()
         val rootFile = new File(tmpDir,"a_root.xml")
@@ -82,8 +115,9 @@ object XMLParsing {
         case str if str == splitTag =>
           if nestingLevel == 0
           then
-            encapsulating.append(buffer)
+            val filteredBuffer = buffer.dropWhile(c => c == ' ' || c == '\r' || c == '\n')
             buffer.clear()
+            encapsulating.append(filteredBuffer)
           flushTagBuffer()
           nestingLevel += 1
         case _ =>
@@ -95,11 +129,11 @@ object XMLParsing {
           nestingLevel -= 1
           if nestingLevel == 0
           then
-            val id = nextId
-            encapsulating.append(s"\r\n    <movedTo id=\"$id\"/>")
-            val outFile = new File(tmpDir, s"${id}.xml")
-            writeOutput(buffer, outFile)
-            files += outFile
+            bundleBuffer.append(buffer)
+            buffer.clear()
+            inCurrentBundle += 1
+            if inCurrentBundle == elementsPerFile
+            then writeBundle()
         case _ =>
           flushTagBuffer()
       },

@@ -14,87 +14,120 @@ import scala.util.Try
 import scala.xml.{NodeSeq, XML}
 
 object FITR {
-  private val localDateQueryFormat = DateTimeFormatter.ISO_OFFSET_DATE_TIME
-  private val dataTimestampFormat = DateTimeFormatter.ISO_OFFSET_DATE_TIME
-  private val dataDateFormat = DateTimeFormatter.ISO_DATE
+  val localDateQueryFormat = DateTimeFormatter.ISO_OFFSET_DATE_TIME
+  val dataTimestampFormat = DateTimeFormatter.ISO_OFFSET_DATE_TIME
+  val dataDateFormat = DateTimeFormatter.ISO_DATE
 
-  private def parseDouble(ns : NodeSeq) = ns.text.trim match {
+  def parseDouble(ns : NodeSeq) = ns.text.trim match {
     case "" => None
     case str => Some(str.toDouble)
   }
 
+  def parseDate(ns : NodeSeq) : Option[LocalDate] = ns.text.trim match {
+    case "" => None
+    case str => Some(LocalDate.parse(str, dataDateFormat))
+  }
 
-  private enum ParseType:
+  def parseString(ns : NodeSeq) : Option[String] = ns.text.trim match {
+    case "" => None
+    case str => Some(str)
+  }
+
+
+  enum ParseType:
     case Equity, NonEquty
 
 
-  case class TransparencyReport(fileName : String, created : LocalDateTime, periodFrom : LocalDate, periodTo :LocalDate, transparencyData : () => LazyList[TransparencyData])
-  trait TransparencyData(recordId : Long, id : String, fromDate : LocalDate, toDate : LocalDate)
+  case class TransparencyReport(fileName : String, created : LocalDateTime, periodFrom : LocalDate, periodTo :LocalDate, transparencyData : () => List[TransparencyData])
+  trait TransparencyData(val recordId : Long, val id : String, val fromDate : Option[LocalDate], val toDate : Option[LocalDate], val liquid : Boolean, val method : String)
   case class EquityTransparencyData(
-                                     recordId : Long,
-                                     id : String,
-                                     fromDate : LocalDate,
-                                     toDate : LocalDate,
-                                     liquid : Boolean,
-                                     method : String,
+                                     override val recordId : Long,
+                                     override val id : String,
+                                     override val fromDate : Option[LocalDate],
+                                     override val toDate : Option[LocalDate],
+                                     override val liquid : Boolean,
+                                     override val method : String,
+                                     classification : Option[String],
+                                     market : Option[String],
                                      avgDailyTurnover : Option[Double],
                                      largeInScale : Option[Double],
-                                     avgDailyNoOfTrans : Option[Double]
-                                   ) extends TransparencyData(recordId, id, fromDate, toDate)
+                                     avgDailyNoOfTrans : Option[Double],
+                                     standardMarketSize : Option[Double],
+                                     avgTransactionValue : Option[Double]
+                                   ) extends TransparencyData(recordId, id, fromDate, toDate, liquid, method)
 
   case class NonEquityTransparencyClass(
-                                         recordId : Long,
-                                         id : String,
-                                         fromDate : LocalDate,
-                                         toDate : LocalDate,
-                                         liquid : Boolean,
-                                         method : String,
+                                         override val recordId : Long,
+                                         override val id : String,
+                                         override val fromDate : Option[LocalDate],
+                                         override val toDate : Option[LocalDate],
+                                         override val liquid : Boolean,
+                                         override val method : String,
                                          largeInScalePre : Option[Double],
                                          largeInScalePost : Option[Double],
                                          instrumentSpecificPre : Option[Double],
                                          instrumentSpecificPost : Option[Double]
-                                       ) extends TransparencyData(recordId,id,fromDate,toDate)
+                                       ) extends TransparencyData(recordId,id,fromDate,toDate, liquid, method)
 
   def transparencyEntries(zipDirectory : File, splitDirectory : File) : LazyList[Either[Seq[String],TransparencyReport]] =
     val zipFiles = zipDirectory.listFiles().filter(f => f.getName.matches("(?i)ful.cr.*zip"))
     zipFiles.to(LazyList).map {
       case f =>
+        println(s"Working on: ${f.getAbsolutePath}")
         val str = unzip(f)
         val parseType = if f.getName.matches("(?i)fulecr.*") then ParseType.Equity else ParseType.NonEquty
         val splitTag = if parseType == ParseType.Equity then "EqtyTrnsprncyData" else "NonEqtyTrnsprncyData"
         val parseResult = XMLParsing.splitXmlString(str, splitDirectory, splitTag, 2_000)
-        parseResult.flatMap {
+        val mappedResult : Either[Seq[String], TransparencyReport] = parseResult.flatMap {
           case res =>
             val containingElem = scala.xml.XML.loadFile(res.root)
             val createdAt = LocalDateTime.parse((containingElem \\ "CreDt").text, dataTimestampFormat)
-            val periodFrom = LocalDate.parse((containingElem \\ "FinInstrmRptgEqtyTradgActvtyRslt" \\ "FrDt").text, dataDateFormat)
-            val periodTo = LocalDate.parse((containingElem \\ "FinInstrmRptgEqtyTradgActvtyRslt" \\ "ToDt").text, dataDateFormat)
+            val periodFrom = parseDate(containingElem \\ "FinInstrmRptgEqtyTradgActvtyRslt" \\ "FrDt").get
+            val periodTo = parseDate(containingElem \\ "FinInstrmRptgEqtyTradgActvtyRslt" \\ "ToDt").get
 
             val entriesLoader = () =>
-              res.files.to(LazyList).flatMap {
+              val records : List[TransparencyData] = res.files.toList.flatMap {
                 case file =>
                   val entriesXML = scala.xml.XML.loadFile(file)
                   val elems = (entriesXML \\ splitTag).map {
                     case el =>
-                      val recordId = (el \\ "TechRcrdId").text.toLong
-                      val id = (el \\ "Id").text
-                      val from = LocalDate.parse((el \\ "FrDtToDt" \\ "FrDt").text, dataDateFormat)
-                      val to = LocalDate.parse((el \\ "FrDtToDt" \\ "ToDt").text, dataDateFormat)
+                      val recordId = (el \ "TechRcrdId").text.toLong
+                      val id = (el \ "Id").text
+                      val from = parseDate(el \ "RptgPrd" \ "FrDtToDt" \ "FrDt")
+                      val to = parseDate(el \ "RptgPrd" \ "FrDtToDt" \ "ToDt")
+                      val liquid = (el \ "Lqdty").text.toBoolean
+                      val method = (el \ "Mthdlgy").text
+
                       parseType match {
-                      case ParseType.Equity =>
-                        val liquid = (el \\ "Lqdty").text.toBoolean
-                        val method = (el \\ "Mthdlgy").text
-                        val avgDailyTurnover = parseDouble(el \\ "AvrgDalyTrnvr")
-                        val largeInScale = parseDouble(el \\ "LrgInScale")
-                        val avgNoOfTrans = parseDouble(el \\ "AvrgDalyNbOfTxs")
-                        EquityTransparencyData(recordId, id, from, to, liquid,method,avgDailyTurnover,largeInScale,avgNoOfTrans)
+                        case ParseType.Equity =>
+                          val classification = parseString(el \ "FinInstrmClssfctn")
+                          val market = parseString(el \"RlvntMkt" \ "Id")
+                          val avgDailyTurnover = parseDouble(el \ "Sttstcs" \ "AvrgDalyTrnvr")
+                          val largeInScale = parseDouble(el \ "Sttstcs" \ "LrgInScale")
+                          val avgNoOfTrans = parseDouble(el \ "Sttstcs" \ "AvrgDalyNbOfTxs")
+                          val marketSize = parseDouble(el \ "Sttstcs" \ "StdMktSz")
+                          val avgTransactionValue = parseDouble(el \ "Sttstcs" \ "AvrgTxVal")
+                          EquityTransparencyData(recordId, id, from, to, liquid, method, classification, market, avgDailyTurnover, largeInScale, avgNoOfTrans, marketSize, avgTransactionValue)
+
+                        case ParseType.NonEquty =>
+                          val largeInScalePre = parseDouble(el \ "PreTradLrgInScaleThrshld" \ "Amt")
+                          val largeInScalePost = parseDouble(el \ "PstTradLrgInScaleThrshld" \ "Amt")
+                          val instrumentSpecificPre = parseDouble(el \ "PreTradInstrmSzSpcfcThrshld" \ "Amt")
+                          val instrumentSpecificPost = parseDouble(el \ "PstTradInstrmSzSpcfcThrshld" \ "Amt")
+                          NonEquityTransparencyClass(recordId, id, from, to, liquid, method, largeInScalePre, largeInScalePost, instrumentSpecificPre, instrumentSpecificPost)
+
                     }
 
                   }
+                  elems.to(LazyList)
               }
               res.cleanUp()
+              records
+
+            Right(TransparencyReport(f.getAbsolutePath,createdAt,periodFrom,periodTo, entriesLoader))
 
         }
+        mappedResult
     }
 
 
