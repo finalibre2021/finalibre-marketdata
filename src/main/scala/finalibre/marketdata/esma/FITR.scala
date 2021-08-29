@@ -38,7 +38,7 @@ object FITR {
     case Equity, NonEquty
 
 
-  case class TransparencyReport(fileName : String, created : LocalDateTime, periodFrom : LocalDate, periodTo :LocalDate, transparencyData : () => List[TransparencyData])
+  case class TransparencyReport(fileName : String, parseType : ParseType, created : LocalDateTime, periodFrom : LocalDate, periodTo :LocalDate, transparencyData : () => List[TransparencyData])
   trait TransparencyData(val recordId : Long, val id : String, val fromDate : Option[LocalDate], val toDate : Option[LocalDate], val liquid : Boolean, val method : String)
   case class EquityTransparencyData(
                                      override val recordId : Long,
@@ -124,7 +124,7 @@ object FITR {
               res.cleanUp()
               records
 
-            Right(TransparencyReport(f.getAbsolutePath,createdAt,periodFrom,periodTo, entriesLoader))
+            Right(TransparencyReport(f.getAbsolutePath, parseType,createdAt,periodFrom,periodTo, entriesLoader))
 
         }
         mappedResult
