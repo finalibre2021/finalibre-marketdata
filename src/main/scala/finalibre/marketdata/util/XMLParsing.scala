@@ -34,7 +34,9 @@ object XMLParsing {
       }
 
   private enum ParsingState:
-    case UnMatched, MatchedOpen, MatchedOpenQuestionMark, MatchedOpenSlash, MatchedElementNameCharacter, MatchedPrologCharacter, MatchedCloseSlash, MatchedCloseQuestionMark
+    case UnMatched, MatchedOpen, MatchedOpenQuestionMark, MatchedOpenSlash,
+    MatchedElementNameCharacter, MatchedPrologCharacter, MatchedCloseSlash,
+    MatchedCloseQuestionMark, InElement
 
   private val PrologParseStates = Set(ParsingState.MatchedOpenQuestionMark, ParsingState.MatchedPrologCharacter)
   private val ElementNameParseStates = Set(ParsingState.MatchedOpen, ParsingState.MatchedOpenSlash, ParsingState.MatchedElementNameCharacter)
@@ -186,10 +188,11 @@ object XMLParsing {
     do
       feed(xmlString(i))
       (xmlString(i), currentState) match {
+        case ('"',ParsingState.InElement) =>
         case ('"',_) =>
           isInAttributeString = !isInAttributeString
         case (ch, _) if isInAttributeString =>
-        case ('<', ParsingState.UnMatched) =>
+        case ('<', ParsingState.UnMatched) | ('<', ParsingState.InElement) =>
           currentElementName.clear()
           currentState = ParsingState.MatchedOpen
           spaceEncountered = false
@@ -202,6 +205,7 @@ object XMLParsing {
         case ('/', ParsingState.MatchedElementNameCharacter) =>
           currentState = ParsingState.MatchedCloseSlash
           currentElementIsOpen = false
+        case ('/', ParsingState.InElement) =>
         case ('/', _) =>
           onError(createUnexpectedCharacterError('/', i, 100))
         case ('?', ParsingState.MatchedOpen) =>
@@ -238,7 +242,9 @@ object XMLParsing {
               openElements.prepend(thisElement)
               onOpenTag(nam)
           }
-          currentState = ParsingState.UnMatched
+          if currentElementIsOpen
+          then currentState = ParsingState.InElement
+          else  currentState = ParsingState.UnMatched
 
         case ('>',_) => onError(createUnexpectedCharacterError('>', i, 100))
 
@@ -251,6 +257,7 @@ object XMLParsing {
             currentElementName.append(ch)
           currentState = ParsingState.MatchedElementNameCharacter
         case (ch, ParsingState.UnMatched) =>
+        case (ch, ParsingState.InElement) =>
         case (ch, st) => onError(createUnexpectedCharacterError(ch, i, 100))
       }
 

@@ -50,6 +50,9 @@ object EsmaDataHandler:
                    | avgdailynooftrans, standardmarketsize, avgtransvalue, largeinscalepre, largeinscalepost, instrumentspecificpre, instrumentspecificpost) values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""".stripMargin
       Update[TransparencyData](stat).updateMany(seq)
 
+    def loadFileNames : Seq[String] =
+      sql"""select filename from fitr_report""".query[String].to[List].transact(xa).unsafeRunSync()
+
 
     def createTables() : Unit =
       (createReportTableStat, createEntryTableStat).mapN(_ + _).transact(xa).unsafeRunSync()
@@ -92,3 +95,46 @@ object EsmaDataHandler:
            |);
            |""".stripMargin.update.run
 
+  object DataInvestigation:
+
+
+    val createFileTableStat =
+      sql"""
+           |create table DATINV_FIL (
+           |  REPORTID identity primary key,
+           |  FILENAME varchar(500) not null
+           |);
+           |""".stripMargin.update.run
+
+
+    val createDataTableStat =
+      sql"""
+           |create table DATINV_DATA (
+           |  REPORTID bigint not null,
+           |  TAG varchar(1500) not null,
+           |  TAGVALUE varchar(100) not null,
+           |  OCCURS bigint not null,
+           |  foreign key (REPORTID) references DATINV_FIL(REPORTID) on delete cascade
+           |);
+           |""".stripMargin.update.run
+
+    private def insertReportValue(filename : String) : ConnectionIO[Long] =
+      sql"""insert into datinv_fil(filename)
+            values ($filename)"""
+        .update
+        .withUniqueGeneratedKeys[Long]("REPORTID")
+
+    private def insertDataValues(values : Seq[(Long, String, String, Long)]) : ConnectionIO[Int] =
+      val stat = """insert into datinv_data(reportid, tag, tagvalue, occurs) values (?,?,?,?)""".stripMargin
+      Update[(Long, String, String, Long)](stat).updateMany(values)
+
+    def insertFileDate(filename : String, values : Seq[(String, String, Long)]) : Unit =
+      val stat = for
+        repId <- insertReportValue(filename)
+        _ <- insertDataValues(values.map(en => (repId, en._1, if en._2.length > 100 then en._2.substring(0,100) else en._2, en._3)))
+      yield repId
+      stat.transact(xa).unsafeRunSync()
+
+
+    def createTables() : Unit =
+      (createFileTableStat, createDataTableStat).mapN(_ + _).transact(xa).unsafeRunSync()

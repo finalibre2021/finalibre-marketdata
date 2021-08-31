@@ -13,7 +13,8 @@ object ExploreFITRSaving:
     val toDate = LocalDate.of(2021, 12, 12)
     val zipFolder = new File("""c:\temp\fitr""")
     val unZipFilder = new File("""c:\temp\fitr-unzipped""")
-    val reports = mod.transparencyEntries(zipFolder, unZipFilder)
+    val previouslyProcessed = EsmaDataHandler.FITR.loadFileNames
+    val reports = mod.transparencyEntries(zipFolder, unZipFilder, previouslyProcessed)
 
     reports.foreach {
       case Left(errs) =>
@@ -29,7 +30,7 @@ object ExploreFITRSaving:
         println(s"Inserted: ${mappedEntries.size} entries for report: ${mappedReport.fileName} (${mappedReport.periodFrom} -> ${mappedReport.periodTo})")
       } match {
         case Success(value) =>
-        case Failure(err) => println(s"Error occured: ${err.getMessage}")  
+        case Failure(err) => println(s"Error occured: ${err.getMessage}")
       }
     }
 

@@ -69,8 +69,9 @@ object FITR {
                                          instrumentSpecificPost : Option[Double]
                                        ) extends TransparencyData(recordId,id,fromDate,toDate, liquid, method)
 
-  def transparencyEntries(zipDirectory : File, splitDirectory : File) : LazyList[Either[Seq[String],TransparencyReport]] =
-    val zipFiles = zipDirectory.listFiles().filter(f => f.getName.matches("(?i)ful.cr.*zip"))
+  def transparencyEntries(zipDirectory : File, splitDirectory : File, skipFiles : Seq[String] = Nil) : LazyList[Either[Seq[String],TransparencyReport]] =
+    val toSkip = skipFiles.map(_.toLowerCase).toSet
+    val zipFiles = zipDirectory.listFiles().filter(f => f.getName.matches("(?i)ful.cr.*zip") && !toSkip(f.getName.toLowerCase))
     zipFiles.to(LazyList).map {
       case f =>
         println(s"Working on: ${f.getAbsolutePath}")
@@ -82,8 +83,12 @@ object FITR {
           case res =>
             val containingElem = scala.xml.XML.loadFile(res.root)
             val createdAt = LocalDateTime.parse((containingElem \\ "CreDt").text, dataTimestampFormat)
-            val periodFrom = parseDate(containingElem \\ "FinInstrmRptgEqtyTradgActvtyRslt" \\ "FrDt").get
-            val periodTo = parseDate(containingElem \\ "FinInstrmRptgEqtyTradgActvtyRslt" \\ "ToDt").get
+            val periodFromEq = parseDate(containingElem \\ "FinInstrmRptgEqtyTradgActvtyRslt" \\ "FrDt")
+            val periodToEq = parseDate(containingElem \\ "FinInstrmRptgEqtyTradgActvtyRslt" \\ "ToDt")
+            val periodFromNonEq = parseDate(containingElem \\ "FinInstrmRptgNonEqtyTradgActvtyRslt" \\ "FrDt")
+            val periodToNonEq = parseDate(containingElem \\ "FinInstrmRptgNonEqtyTradgActvtyRslt" \\ "ToDt")
+            val periodFrom = periodFromEq.orElse(periodFromNonEq).get
+            val periodTo = periodToEq.orElse(periodToNonEq).get
 
             val entriesLoader = () =>
               val records : List[TransparencyData] = res.files.toList.flatMap {
